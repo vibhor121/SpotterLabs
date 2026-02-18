@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+db.sqlite3
+
+# Local environment file (contains secrets like API keys)
+.env
+
+
+
+
