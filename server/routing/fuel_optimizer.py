@@ -119,11 +119,13 @@ def compute_fuel_plan(
     mpg: float | None = None,
 ) -> List[FuelStopPlan]:
     """
-    Simple greedy fuel optimization:
+    Greedy fuel optimization:
 
-    - Vehicle has max range (tank size) in miles.
-    - Look ahead up to range from current position and pick the cheapest within reach.
-    - Buy enough fuel to reach either the next cheaper station or as far as possible.
+    - Vehicle starts with a full tank (vehicle_range_miles of fuel).
+    - At each stop, look ahead up to vehicle_range_miles for a cheaper station.
+      - If a cheaper station exists ahead, buy just enough to reach it.
+      - Otherwise fill the tank.
+    - Never buy more fuel than needed to reach the destination.
     """
     if vehicle_range_miles is None:
         vehicle_range_miles = float(settings.VEHICLE_RANGE_MILES)
@@ -136,86 +138,65 @@ def compute_fuel_plan(
         return []
 
     stops: List[FuelStopPlan] = []
-    current_pos = 0.0  # miles along route
-    fuel_in_tank_miles = 0.0
-    idx = 0
+    current_pos = 0.0          # miles along route
+    fuel_in_tank_miles = vehicle_range_miles  # start with a full tank
 
-    while current_pos < route_distance:
-        # Determine the furthest we can go from current position
-        max_reach = current_pos + vehicle_range_miles
-        if max_reach >= route_distance:
-            # We can reach the destination; buy just enough if needed and finish
-            distance_needed = max(0.0, route_distance - current_pos - fuel_in_tank_miles)
-            if distance_needed > 1e-6:
-                # Buy at the current station if we are at one; otherwise skip cost
-                if stops:
-                    current_station = stops[-1].station
-                    gallons = distance_needed / mpg
-                    cost = gallons * current_station.price_per_gallon
-                    stops.append(
-                        FuelStopPlan(
-                            station=current_station,
-                            distance_along_route_miles=current_pos,
-                            gallons_purchased=gallons,
-                            cost_usd=cost,
-                        )
-                    )
+    while current_pos < route_distance - 1e-6:
+        # How far can we get on current fuel?
+        can_reach = current_pos + fuel_in_tank_miles
+
+        if can_reach >= route_distance:
+            # We can reach the destination — no more stops needed
             break
 
-        # Find all candidate stations within reach ahead of us
-        reachable: List[Tuple[FuelStation, float]] = []
-        while idx < len(candidates) and candidates[idx][1] <= max_reach:
-            if candidates[idx][1] >= current_pos:
-                reachable.append(candidates[idx])
-            idx += 1
+        # We will run out before the destination; must refuel within vehicle_range_miles
+        max_reach = current_pos + vehicle_range_miles
+
+        # All stations reachable from current position (filter-based, no monotonic index bug)
+        reachable: List[Tuple[FuelStation, float]] = [
+            (s, d) for (s, d) in candidates
+            if current_pos < d <= max_reach
+        ]
 
         if not reachable:
-            # No stations within reach; cannot complete route with given range
+            # No stations within range — cannot complete route
             break
 
         # Choose the cheapest station among reachable ones
-        cheapest_station, cheapest_dist = min(
-            reachable, key=lambda x: x[0].price_per_gallon
-        )
+        cheapest_station, cheapest_dist = min(reachable, key=lambda x: x[0].price_per_gallon)
 
-        # Move to that station
-        distance_to_station = max(0.0, cheapest_dist - current_pos)
-        if distance_to_station > fuel_in_tank_miles + 1e-6:
-            # Need to ensure we can reach it; in this simple model, assume we can by filling at current point
-            # but we may not be at a station, so just reset tank logically
-            fuel_in_tank_miles = distance_to_station
+        # Drive to that station
+        distance_to_station = cheapest_dist - current_pos
         fuel_in_tank_miles -= distance_to_station
         current_pos = cheapest_dist
 
-        # Decide how much to fill at this station:
-        # look ahead for any cheaper station within full range
+        # Decide how much to buy at this station:
+        # look ahead for any cheaper station within a full tank's range from here
         max_from_here = current_pos + vehicle_range_miles
-        cheaper_within_range = [
-            (s, d)
-            for (s, d) in candidates
-            if current_pos < d <= max_from_here and s.price_per_gallon < cheapest_station.price_per_gallon
+        cheaper_ahead: List[Tuple[FuelStation, float]] = [
+            (s, d) for (s, d) in candidates
+            if current_pos < d <= max_from_here
+            and s.price_per_gallon < cheapest_station.price_per_gallon
         ]
-        if cheaper_within_range:
-            # Only buy enough to reach the next cheaper station
-            next_cheaper_station, next_cheaper_dist = min(
-                cheaper_within_range, key=lambda x: x[1]
-            )
-            distance_needed = max(0.0, next_cheaper_dist - current_pos)
+
+        if cheaper_ahead:
+            # Buy just enough to reach the nearest cheaper station
+            next_cheaper_station, next_cheaper_dist = min(cheaper_ahead, key=lambda x: x[1])
+            distance_needed = max(0.0, next_cheaper_dist - current_pos - fuel_in_tank_miles)
         else:
-            # No cheaper station ahead within range; fill the tank
-            distance_needed = vehicle_range_miles
+            # No cheaper station ahead — fill the tank
+            distance_needed = vehicle_range_miles - fuel_in_tank_miles
 
-        # Ensure we don't exceed what is needed to finish the route
-        distance_needed = min(distance_needed, route_distance - current_pos)
+        # Never buy more than needed to finish the route
+        distance_needed = min(distance_needed, route_distance - current_pos - fuel_in_tank_miles)
+        distance_needed = max(0.0, distance_needed)
 
-        # Add missing fuel
-        additional_needed = max(0.0, distance_needed - fuel_in_tank_miles)
-        if additional_needed <= 1e-6:
+        if distance_needed <= 1e-6:
             continue
 
-        gallons = additional_needed / mpg
+        gallons = distance_needed / mpg
         cost = gallons * cheapest_station.price_per_gallon
-        fuel_in_tank_miles += additional_needed
+        fuel_in_tank_miles += distance_needed
 
         stops.append(
             FuelStopPlan(
@@ -227,8 +208,3 @@ def compute_fuel_plan(
         )
 
     return stops
-
-
-
-
-

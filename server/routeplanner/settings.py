@@ -90,6 +90,12 @@ FUEL_PRICE_FILE = os.environ.get(
     str(BASE_DIR / "data" / "fuel_prices.csv"),
 )
 
+# Path to the US cities geocoding file (city/state -> lat/lng lookup)
+US_CITIES_FILE = os.environ.get(
+    "US_CITIES_FILE",
+    str(BASE_DIR / "data" / "us_cities.csv"),
+)
+
 VEHICLE_RANGE_MILES = float(os.environ.get("VEHICLE_RANGE_MILES", "500"))
 VEHICLE_MPG = float(os.environ.get("VEHICLE_MPG", "10"))
 

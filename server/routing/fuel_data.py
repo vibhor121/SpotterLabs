@@ -2,7 +2,7 @@ import csv
 import math
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable, List
+from typing import Dict, Iterable, List, Tuple
 
 from django.conf import settings
 
@@ -23,31 +23,74 @@ class FuelStation:
 
 
 @lru_cache(maxsize=1)
+def _load_city_coords() -> Dict[Tuple[str, str], Tuple[float, float]]:
+    """
+    Load (CITY_UPPER, STATE_CODE_UPPER) -> (lat, lng) from us_cities.csv.
+    Used to geocode fuel stations that only have city/state, not coordinates.
+    """
+    path = getattr(settings, "US_CITIES_FILE", "")
+    coords: Dict[Tuple[str, str], Tuple[float, float]] = {}
+    if not path:
+        return coords
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            # Skip leading blank lines so DictReader picks up the real header
+            non_empty = (line for line in f if line.strip())
+            reader = csv.DictReader(non_empty)
+            for row in reader:
+                state = (row.get("STATE_CODE") or "").strip().upper()
+                city = (row.get("CITY") or "").strip().upper()
+                lat_s = (row.get("LATITUDE") or "").strip()
+                lon_s = (row.get("LONGITUDE") or "").strip()
+                if not (city and state and lat_s and lon_s):
+                    continue
+                try:
+                    coords[(city, state)] = (float(lat_s), float(lon_s))
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        pass
+    return coords
+
+
+@lru_cache(maxsize=1)
 def load_fuel_stations() -> List[FuelStation]:
     """
     Load fuel price data from the CSV file specified in settings.FUEL_PRICE_FILE.
 
-    Expected CSV columns (header names are flexible but must contain at least):
-    - id or station_id
-    - name
-    - lat or latitude
-    - lon or lng or longitude
-    - price or price_per_gallon
+    Supports the actual assessment CSV format:
+        OPIS Truckstop ID, Truckstop Name, Address, City, State, Rack ID, Retail Price
+
+    Also supports generic formats with flexible column names.
+    When lat/lng columns are absent, geocodes city+state via us_cities.csv.
     """
     path = settings.FUEL_PRICE_FILE
+    city_coords = _load_city_coords()
     stations: list[FuelStation] = []
     try:
         with open(path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # Try a few common header names
+                # Station ID — actual CSV uses "OPIS Truckstop ID"
                 station_id = (
-                    row.get("station_id")
+                    row.get("OPIS Truckstop ID")
+                    or row.get("station_id")
                     or row.get("id")
                     or row.get("StationId")
                     or ""
                 )
-                name = row.get("name") or row.get("Name") or "Unknown"
+                # Name — actual CSV uses "Truckstop Name"
+                name = (
+                    row.get("Truckstop Name")
+                    or row.get("name")
+                    or row.get("Name")
+                    or "Unknown"
+                )
+                # City and state for geocoding fallback
+                city = (row.get("City") or "").strip().upper()
+                state = (row.get("State") or "").strip().upper()
+
+                # Try direct lat/lng columns first
                 lat_str = (
                     row.get("lat")
                     or row.get("latitude")
@@ -61,13 +104,28 @@ def load_fuel_stations() -> List[FuelStation]:
                     or row.get("Lon")
                     or row.get("Longitude")
                 )
+
+                # Price — actual CSV uses "Retail Price"
                 price_str = (
-                    row.get("price")
+                    row.get("Retail Price")
+                    or row.get("price")
                     or row.get("price_per_gallon")
                     or row.get("Price")
                 )
-                if not (lat_str and lon_str and price_str):
+
+                if not price_str:
                     continue
+
+                # If no direct coordinates, look up by city+state
+                if not (lat_str and lon_str) and city and state:
+                    coord = city_coords.get((city, state))
+                    if coord:
+                        lat_str = str(coord[0])
+                        lon_str = str(coord[1])
+
+                if not (lat_str and lon_str):
+                    continue
+
                 try:
                     stations.append(
                         FuelStation(
@@ -79,10 +137,8 @@ def load_fuel_stations() -> List[FuelStation]:
                         )
                     )
                 except ValueError:
-                    # Skip malformed rows
                     continue
     except FileNotFoundError:
-        # In assignment environments where the file is missing, return empty list
         return []
 
     return stations
@@ -144,9 +200,3 @@ def station_indices_near_route(route_geometry: list, max_off_route_miles: float)
         for fi in found:
             idxs_set.add(fi)
     return sorted(idxs_set)
-
-
-
-
-
-
