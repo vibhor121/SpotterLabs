@@ -53,7 +53,9 @@ def _load_city_coords() -> Dict[Tuple[str, str], Tuple[float, float]]:
 
     try:
         with open(csv_path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
+            # Skip leading blank lines so DictReader picks up the real header
+            non_blank = (line for line in f if line.strip())
+            reader = csv.DictReader(non_blank)
             for row in reader:
                 # Support simplemaps format (city, state_id, lat, lng)
                 # and kelvins format (CITY, STATE_CODE, LATITUDE, LONGITUDE)
@@ -269,3 +271,4 @@ def station_indices_near_route(route_geometry: list, max_off_route_miles: float)
         for fi in found:
             idxs_set.add(fi)
     return sorted(idxs_set)
+

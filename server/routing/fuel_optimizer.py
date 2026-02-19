@@ -65,14 +65,19 @@ def _project_station_onto_route(
     for i in range(1, len(pts)):
         a = pts[i - 1]
         b = pts[i]
-        # Approximate by taking min distance to segment endpoints
         da = _haversine_miles(station.latitude, station.longitude, a.lat, a.lng)
         db = _haversine_miles(station.latitude, station.longitude, b.lat, b.lng)
-        seg_best_off = min(da, db)
+        if da <= db:
+            # Station is closer to the near end (a) — use its cumulative distance
+            seg_best_off = da
+            seg_best_along = cum_dists[i - 1]
+        else:
+            # Station is closer to the far end (b)
+            seg_best_off = db
+            seg_best_along = cum_dists[i]
         if seg_best_off < best_off:
             best_off = seg_best_off
-            # Use segment end as distance along route
-            best_along = cum_dists[i]
+            best_along = seg_best_along
 
     return best_along, best_off
 
@@ -223,6 +228,7 @@ def compute_fuel_plan(
         )
 
     return stops
+
 
 
 
