@@ -65,19 +65,14 @@ def _project_station_onto_route(
     for i in range(1, len(pts)):
         a = pts[i - 1]
         b = pts[i]
+        # Approximate by taking min distance to segment endpoints
         da = _haversine_miles(station.latitude, station.longitude, a.lat, a.lng)
         db = _haversine_miles(station.latitude, station.longitude, b.lat, b.lng)
-        if da <= db:
-            # Station is closer to the near end (a) — use its cumulative distance
-            seg_best_off = da
-            seg_best_along = cum_dists[i - 1]
-        else:
-            # Station is closer to the far end (b)
-            seg_best_off = db
-            seg_best_along = cum_dists[i]
+        seg_best_off = min(da, db)
         if seg_best_off < best_off:
             best_off = seg_best_off
-            best_along = seg_best_along
+            # Use segment end as distance along route
+            best_along = cum_dists[i]
 
     return best_along, best_off
 
@@ -85,7 +80,7 @@ def _project_station_onto_route(
 def _stations_along_route(
     stations: Iterable[FuelStation],
     route: RouteInfo,
-    max_off_route_miles: float = 10.0,
+    max_off_route_miles: float = 50.0,
 ) -> List[Tuple[FuelStation, float]]:
     """
     Filter stations to those reasonably close to the route and annotate with
@@ -142,7 +137,7 @@ def compute_fuel_plan(
 
     stops: List[FuelStopPlan] = []
     current_pos = 0.0  # miles along route
-    fuel_in_tank_miles = vehicle_range_miles  # start with a full tank
+    fuel_in_tank_miles = 0.0
     idx = 0
 
     while current_pos < route_distance:
@@ -185,6 +180,10 @@ def compute_fuel_plan(
 
         # Move to that station
         distance_to_station = max(0.0, cheapest_dist - current_pos)
+        if distance_to_station > fuel_in_tank_miles + 1e-6:
+            # Need to ensure we can reach it; in this simple model, assume we can by filling at current point
+            # but we may not be at a station, so just reset tank logically
+            fuel_in_tank_miles = distance_to_station
         fuel_in_tank_miles -= distance_to_station
         current_pos = cheapest_dist
 

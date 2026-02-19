@@ -1,14 +1,11 @@
 import csv
-import logging
 import math
-import os
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List
 
 from django.conf import settings
 
-logger = logging.getLogger(__name__)
 
 # Very small "BallTree-like" helper: precompute station lat/lon in radians
 # and do radius queries with haversine distance. This keeps a simple
@@ -25,131 +22,32 @@ class FuelStation:
     price_per_gallon: float
 
 
-# ---------------------------------------------------------------------------
-# US Cities lat/lon lookup (loaded once from simplemaps us_cities.csv)
-# ---------------------------------------------------------------------------
-
-_city_coords: Optional[Dict[Tuple[str, str], Tuple[float, float]]] = None
-
-_CITIES_CSV = os.path.join(os.path.dirname(__file__), "..", "data", "us_cities.csv")
-
-
-def _load_city_coords() -> Dict[Tuple[str, str], Tuple[float, float]]:
-    """Load simplemaps US cities CSV into a (city_lower, state_abbr) → (lat, lon) dict."""
-    global _city_coords
-    if _city_coords is not None:
-        return _city_coords
-
-    lookup: Dict[Tuple[str, str], Tuple[float, float]] = {}
-    csv_path = os.path.normpath(_CITIES_CSV)
-    if not os.path.exists(csv_path):
-        logger.warning(
-            "us_cities.csv not found at %s. "
-            "Run: python manage.py download_city_data",
-            csv_path,
-        )
-        _city_coords = lookup
-        return lookup
-
-    try:
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            # Skip leading blank lines so DictReader picks up the real header
-            non_blank = (line for line in f if line.strip())
-            reader = csv.DictReader(non_blank)
-            for row in reader:
-                # Support simplemaps format (city, state_id, lat, lng)
-                # and kelvins format (CITY, STATE_CODE, LATITUDE, LONGITUDE)
-                city = (
-                    row.get("city") or row.get("City") or row.get("CITY") or ""
-                ).strip()
-                state = (
-                    row.get("state_id")
-                    or row.get("STATE_CODE")
-                    or row.get("state")
-                    or row.get("State")
-                    or ""
-                ).strip()
-                lat_str = (
-                    row.get("lat") or row.get("Lat")
-                    or row.get("latitude") or row.get("LATITUDE") or ""
-                )
-                lon_str = (
-                    row.get("lng") or row.get("lon")
-                    or row.get("longitude") or row.get("LONGITUDE") or ""
-                )
-                if not (city and state and lat_str and lon_str):
-                    continue
-                try:
-                    lat = float(lat_str)
-                    lon = float(lon_str)
-                except ValueError:
-                    continue
-                key = (city.lower(), state.upper())
-                # Keep first occurrence
-                if key not in lookup:
-                    lookup[key] = (lat, lon)
-    except Exception as exc:
-        logger.error("Failed to load us_cities.csv: %s", exc)
-
-    _city_coords = lookup
-    logger.info("Loaded %d city coordinates from us_cities.csv", len(lookup))
-    return lookup
-
-
-def _city_latlon(city: str, state: str) -> Optional[Tuple[float, float]]:
-    lookup = _load_city_coords()
-    return lookup.get((city.lower(), state.upper()))
-
-
-# ---------------------------------------------------------------------------
-# Fuel station loader
-# ---------------------------------------------------------------------------
-
 @lru_cache(maxsize=1)
 def load_fuel_stations() -> List[FuelStation]:
     """
     Load fuel price data from the CSV file specified in settings.FUEL_PRICE_FILE.
 
-    Supports the OPIS truckstop CSV format:
-        OPIS Truckstop ID | Truckstop Name | Address | City | State | Rack ID | Retail Price
-
-    Also accepts generic CSVs with headers like:
-        id/station_id, name, lat/latitude, lon/lng/longitude, price/price_per_gallon
+    Expected CSV columns (header names are flexible but must contain at least):
+    - id or station_id
+    - name
+    - lat or latitude
+    - lon or lng or longitude
+    - price or price_per_gallon
     """
     path = settings.FUEL_PRICE_FILE
     stations: list[FuelStation] = []
-    skipped = 0
     try:
         with open(path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # Station ID
+                # Try a few common header names
                 station_id = (
-                    row.get("OPIS Truckstop ID")
-                    or row.get("station_id")
+                    row.get("station_id")
                     or row.get("id")
                     or row.get("StationId")
                     or ""
                 )
-                # Name
-                name = (
-                    row.get("Truckstop Name")
-                    or row.get("name")
-                    or row.get("Name")
-                    or "Unknown"
-                )
-                # Price
-                price_str = (
-                    row.get("Retail Price")
-                    or row.get("price")
-                    or row.get("price_per_gallon")
-                    or row.get("Price")
-                )
-                if not price_str:
-                    skipped += 1
-                    continue
-
-                # Lat/lon — try direct columns first, then city/state lookup
+                name = row.get("name") or row.get("Name") or "Unknown"
                 lat_str = (
                     row.get("lat")
                     or row.get("latitude")
@@ -163,55 +61,30 @@ def load_fuel_stations() -> List[FuelStation]:
                     or row.get("Lon")
                     or row.get("Longitude")
                 )
-
-                lat: Optional[float] = None
-                lon: Optional[float] = None
-
-                if lat_str and lon_str:
-                    try:
-                        lat = float(lat_str)
-                        lon = float(lon_str)
-                    except ValueError:
-                        pass
-
-                if lat is None or lon is None:
-                    # Fall back to city/state geocoding via bundled lookup
-                    city = (row.get("City") or row.get("city") or "").strip()
-                    state = (row.get("State") or row.get("state") or "").strip()
-                    if city and state:
-                        coords = _city_latlon(city, state)
-                        if coords:
-                            lat, lon = coords
-                        else:
-                            logger.debug("No coords for city=%s state=%s", city, state)
-                            skipped += 1
-                            continue
-                    else:
-                        skipped += 1
-                        continue
-
-                try:
-                    price = float(price_str)
-                except ValueError:
-                    skipped += 1
-                    continue
-
-                stations.append(
-                    FuelStation(
-                        station_id=str(station_id),
-                        name=str(name),
-                        latitude=lat,
-                        longitude=lon,
-                        price_per_gallon=price,
-                    )
+                price_str = (
+                    row.get("price")
+                    or row.get("price_per_gallon")
+                    or row.get("Price")
                 )
+                if not (lat_str and lon_str and price_str):
+                    continue
+                try:
+                    stations.append(
+                        FuelStation(
+                            station_id=str(station_id),
+                            name=name,
+                            latitude=float(lat_str),
+                            longitude=float(lon_str),
+                            price_per_gallon=float(price_str),
+                        )
+                    )
+                except ValueError:
+                    # Skip malformed rows
+                    continue
     except FileNotFoundError:
-        logger.warning("Fuel price file not found: %s", path)
+        # In assignment environments where the file is missing, return empty list
         return []
 
-    if skipped:
-        logger.warning("Skipped %d rows from fuel CSV (missing price or coordinates)", skipped)
-    logger.info("Loaded %d fuel stations", len(stations))
     return stations
 
 
@@ -271,4 +144,9 @@ def station_indices_near_route(route_geometry: list, max_off_route_miles: float)
         for fi in found:
             idxs_set.add(fi)
     return sorted(idxs_set)
+
+
+
+
+
 
